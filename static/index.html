@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloud RAG</title>
+<style>
+:root{--bg:#eef2f4;--card:#fff;--ink:#14262b;--mut:#5f7379;--acc:#0e7490;--on:#fff;--line:#d4dde0}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1719;--card:#152124;--ink:#e6f0f2;--mut:#8aa0a6;--acc:#5eead4;--on:#06201c;--line:#26383c}}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:grid;grid-template-columns:300px 1fr;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,sans-serif}
+aside{padding:20px;border-right:1px solid var(--line);overflow:auto}
+h1{margin:0 0 4px;font:700 24px/1.2 Georgia,serif}
+.sub{margin:0 0 18px;color:var(--mut);font-size:13px}
+#drop{padding:26px 12px;text-align:center;border:2px dashed var(--line);border-radius:10px;color:var(--mut);cursor:pointer}
+#drop:hover,#drop.on,#drop:focus-visible{border-color:var(--acc);color:var(--acc);outline:none}
+.doc{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px;overflow-wrap:anywhere}
+.doc button{border:0;background:none;color:var(--mut);cursor:pointer}
+.doc button:hover,.doc button:focus-visible{color:var(--acc)}
+main{display:flex;flex-direction:column;min-width:0;height:100vh}
+#log{flex:1;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:14px}
+.m{max-width:760px;padding:12px 16px;border-radius:10px;background:var(--card);border:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere}
+.u{align-self:flex-end;background:var(--acc);color:var(--on);border-color:transparent}
+.src{margin-top:10px;font-size:12px;color:var(--mut);white-space:normal}
+.src a{color:var(--acc)}
+#f{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:14px 24px;border-top:1px solid var(--line)}
+#q{flex:1;min-width:200px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font:inherit}
+#q:focus-visible{outline:2px solid var(--acc)}
+.go{padding:12px 20px;border:0;border-radius:8px;background:var(--acc);color:var(--on);font:inherit;font-weight:600;cursor:pointer}
+label{font-size:13px;color:var(--mut)}
+@media(max-width:760px){body{grid-template-columns:1fr;grid-template-rows:auto 1fr;height:auto;min-height:100vh}aside{border-right:0;border-bottom:1px solid var(--line);max-height:38vh}main{height:80vh}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>Cloud RAG</h1>
+  <p class="sub">Ask questions about your files, with the web as backup.</p>
+  <div id="drop" tabindex="0" role="button">Drop files here or click to choose</div>
+  <input type="file" id="pick" multiple hidden>
+  <div id="docs"></div>
+</aside>
+<main>
+  <div id="log"><div class="m">Upload a PDF, Word, Excel, PowerPoint, image, text or code file, then ask anything about it.</div></div>
+  <div id="f">
+    <input id="q" type="text" placeholder="Ask a question" autocomplete="off">
+    <label><input type="checkbox" id="web" checked> Search the web</label>
+    <button class="go" id="send">Ask</button>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const DROP = 'Drop files here or click to choose';
+let chat = [];
+
+async function refresh() {
+  const docs = await (await fetch('/api/documents')).json();
+  $('#docs').innerHTML = docs.length ? '' : '<p class="sub">No files yet.</p>';
+  docs.forEach(d => {
+    const row = document.createElement('div'); row.className = 'doc';
+    const name = document.createElement('span'); name.textContent = `${d.name} (${d.chunks} parts)`;
+    const del = document.createElement('button'); del.textContent = 'Remove'; del.setAttribute('aria-label', 'Remove ' + d.name);
+    del.onclick = async () => { await fetch('/api/documents/' + d.id, {method: 'DELETE'}); refresh(); };
+    row.append(name, del); $('#docs').append(row);
+  });
+}
+
+async function upload(files) {
+  if (!files.length) return;
+  $('#drop').textContent = 'Indexing files…';
+  const fd = new FormData(); [...files].forEach(f => fd.append('files', f));
+  try {
+    const r = await fetch('/api/upload', {method: 'POST', body: fd});
+    if (!r.ok) alert((await r.json()).detail);
+  } catch (e) { alert('Upload failed: ' + e.message); }
+  $('#drop').textContent = DROP; $('#pick').value = ''; refresh();
+}
+
+$('#drop').onclick = () => $('#pick').click();
+$('#drop').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') $('#pick').click(); };
+$('#pick').onchange = e => upload(e.target.files);
+$('#drop').ondragover = e => { e.preventDefault(); $('#drop').classList.add('on'); };
+$('#drop').ondragleave = () => $('#drop').classList.remove('on');
+$('#drop').ondrop = e => { e.preventDefault(); $('#drop').classList.remove('on'); upload(e.dataTransfer.files); };
+
+function add(text, cls) {
+  const el = document.createElement('div'); el.className = 'm ' + cls; el.textContent = text;
+  $('#log').append(el); el.scrollIntoView(); return el;
+}
+
+async function ask() {
+  const q = $('#q').value.trim(); if (!q) return;
+  $('#q').value = ''; add(q, 'u'); const out = add('Thinking…', '');
+  try {
+    const r = await fetch('/api/ask', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q, use_web: $('#web').checked, history: chat})});
+    const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.status);
+    out.textContent = d.answer || 'No answer returned.';
+    chat.push({role: 'user', content: q}, {role: 'assistant', content: d.answer});
+    if (d.sources.length) {
+      const s = document.createElement('div'); s.className = 'src'; s.append('Sources: ');
+      d.sources.forEach((x, i) => {
+        const a = document.createElement(x.url ? 'a' : 'span'); a.textContent = x.title;
+        if (x.url) { a.href = x.url; a.target = '_blank'; a.rel = 'noopener'; }
+        s.append(a, i < d.sources.length - 1 ? ' | ' : '');
+      });
+      out.append(s);
+    }
+  } catch (e) { out.textContent = 'Something went wrong: ' + e.message; }
+}
+$('#send').onclick = ask;
+$('#q').onkeydown = e => { if (e.key === 'Enter') ask(); };
+refresh();
+</script>
+</body>
+</html>
